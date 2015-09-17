@@ -1,0 +1,4 @@
+[package]
+name = "snowglobe"
+version = "0.1.0"
+authors = ["Kyle Zentner <kzentner@mozilla.com>"]
