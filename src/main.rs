@@ -98,6 +98,105 @@ impl fmt::Display for BitGrid {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Type {
+    Grid,
+    Number,
+    Bool,
+    Null
+}
+
+#[derive(Clone, Copy)]
+enum Value {
+    Grid(BitGrid),
+    Number(i64),
+    Bool(bool),
+    Null
+}
+
+struct Operator {
+    input: Type,
+    secondary: Type,
+    output: Type,
+    op: Box<Fn(Value, Value) -> Value>,
+    name: &'static str,
+    cost: i64
+}
+
+fn create_operator() -> Vec<Operator> {
+    vec![
+        Operator::new("count", 2, Type::Grid, Type::Null, Type::Number,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Grid(ref x),
+                 Value::Null) => Value::Number(x.bits.count_ones() as i64),
+                 _ => Value::Null
+            }
+        })),
+        Operator::new("even", 2, Type::Number, Type::Null, Type::Bool,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Number(ref x),
+                 Value::Null) => Value::Bool(x % 2 == 0),
+                 _ => Value::Null
+            }
+        })),
+        Operator::new("mux", 1, Type::Grid, Type::Bool, Type::Grid,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Grid(ref x2),
+                 Value::Bool(y)) => if y {
+                    x.clone()
+                } else {
+                    Value::Grid(BitGrid::zero())
+                },
+                _ => Value::Null
+            }
+        })),
+        Operator::new("not", 1, Type::Bool, Type::Null, Type::Bool,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Bool(ref x),
+                 Value::Null) => Value::Bool(!x),
+                 _ => Value::Null
+            }
+        })),
+        Operator::new("union", 1, Type::Grid, Type::Grid, Type::Grid,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Grid(ref x),
+                 Value::Grid(ref y)) =>
+                    Value::Grid(BitGrid { bits: x.bits | y.bits } ),
+                 _ => Value::Null
+            }
+        })),
+        Operator::new("intersect", 1, Type::Grid, Type::Grid, Type::Grid,
+                      Box::new(move |x, y| {
+            match (x, y) {
+                (Value::Grid(ref x),
+                 Value::Grid(ref y)) =>
+                    Value::Grid(BitGrid { bits: x.bits & y.bits } ),
+                 _ => Value::Null
+            }
+        })),
+    ]
+}
+
+impl Operator {
+    fn new(name: &'static str, cost: i64, input: Type, secondary: Type,
+           out: Type, f: Box<Fn(Value, Value) -> Value>) -> Operator
+    {
+        Operator {
+            input: input,
+            secondary: secondary,
+            output: out,
+            op: f,
+            name: name,
+            cost: cost
+        }
+    }
+}
+
 struct MoveTree {
     board: String,
     children: Vec<MoveTree>
