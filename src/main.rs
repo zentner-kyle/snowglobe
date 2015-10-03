@@ -1,3 +1,7 @@
+extern crate serde_json;
+#[allow(dead_code)]
+
+
 use std::fmt;
 
 #[derive(Clone)]
@@ -94,6 +98,66 @@ impl fmt::Display for BitGrid {
     }
 }
 
+struct MoveTree {
+    board: String,
+    children: Vec<MoveTree>
+}
+
+impl MoveTree {
+    fn from_json_str(json: &str) -> Option<Self> {
+        Self::from_json(serde_json::from_str(json))
+    }
+
+    fn from_json_reader(reader: &mut std::io::Read) -> Option<Self> {
+        Self::from_json(serde_json::from_reader(reader))
+    }
+
+    fn from_json(json: serde_json::error::Result<serde_json::Value>) ->
+            Option<Self> {
+        if let Ok(data) = json {
+            Self::from_json_inner(&data)
+        } else {
+            None
+        }
+    }
+
+    fn from_json_inner(data: &serde_json::Value) -> Option<Self> {
+        if let Some(obj) = data.as_object() {
+            match (obj.get("board"),
+                   obj.get("children")) {
+                (Some(&serde_json::Value::String(ref board)),
+                 Some(&serde_json::Value::Array(ref children))) => {
+                    let children_parsed : Vec<Self> =
+                        children.iter()
+                                .filter_map(Self::from_json_inner)
+                                .collect();
+                    if children_parsed.len() == children.len() {
+                        Some(MoveTree {
+                            board: board.clone(),
+                            children: children_parsed
+                        })
+                    } else {
+                        None
+                    }
+                },
+                (Some(&serde_json::Value::String(ref board)),
+                 None) => {
+                    Some(MoveTree {
+                        board: board.clone(),
+                        children: Vec::new()
+                    })
+                },
+                _ => {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+}
+
+
 fn main() {
     let pos = "___\n\
                ___\n\
@@ -102,4 +166,11 @@ fn main() {
         println!("blanks = {}", blanks);
         println!("blank_space = {}", blank_space);
     }
+    if let Ok(mut file) = std::fs::File::open("ttt.game_tree") {
+        println!("opened file");
+        if let Some(tree) = MoveTree::from_json_reader(&mut file as &mut std::io::Read) {
+            println!("loaded game tree!");
+        }
+    }
+
 }

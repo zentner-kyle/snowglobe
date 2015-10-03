@@ -2,3 +2,6 @@
 name = "snowglobe"
 version = "0.1.0"
 authors = ["Kyle R. Zentner <zentner.kyle@gmail.com>"]
+
+[dependencies]
+serde_json = "0.6.0"
