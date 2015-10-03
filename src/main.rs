@@ -1,187 +1,105 @@
-use std::ops::Index;
-
-trait IndexLike {
-  fn to_index(&self, max: &Self) -> usize;
-  fn from_index(i: usize, max: &Self) -> Self;
-  fn max_index(&self) -> usize;
-}
-
-trait Blank {
-  fn blank() -> Self;
-}
+use std::fmt;
 
 #[derive(Clone)]
-struct Point2d {
-  x: usize,
-  y: usize,
+struct Space {
+    width: u64,
+    height: u64,
+    character: Option<char>
 }
 
-impl Point2d {
-  fn new(x: usize, y: usize) -> Point2d {
-    Point2d{x: x, y: y}
-  }
-}
-
-impl IndexLike for Point2d {
-  fn to_index(&self, max: &Point2d) -> usize {
-    if self.x > max.x || self.y > max.y {
-      panic!("Point out of bounds");
-    }
-    (self.x % (max.x)) + (max.x) * (self.y % (max.y))
-  }
-  fn from_index(idx: usize, max: &Point2d) -> Point2d {
-    Point2d::new(idx % (max.x - 1), idx / (max.x - 1))
-  }
-  fn max_index(&self) -> usize {
-    (self.x) * (self.y) - 1
-  }
-}
-
-impl Blank for char {
-  fn blank() -> char {
-    ' '
-  }
-}
-
-struct Grid<K, V>
-  where K : IndexLike + Clone,
-        V : Blank + Clone
-{
-  cells : Vec<V>,
-  max : K
-}
-
-struct GridIndices<'a, K : 'a, V : 'a>
-  where K : IndexLike + Clone,
-        V : Blank + Clone
-{
-  grid : &'a Grid<K, V>,
-  current : K,
-}
-
-impl<K, V> Index<K> for Grid<K, V>
-  where K : IndexLike + Clone,
-        V : Blank + Clone
-{
-  type Output = V;
-  fn index<'a>(&'a self, k: K) -> &'a V {
-    &self.cells[k.to_index(&self.max)]
-  }
-}
-
-impl<'a, K, V> Iterator for GridIndices<'a, K, V>
-  where K : IndexLike + Clone,
-        V : Blank + Clone
-{
-  type Item = K;
-  fn next(&mut self) -> Option<K> {
-    let max = self.grid.max.clone();
-    let old = self.current.clone();
-    let idx = old.to_index(&max);
-    if idx > max.max_index() {
-      None
-    } else {
-      self.current = K::from_index(idx + 1, &max);
-      Some(old)
-    }
-  }
-}
-
-impl<K, V> Grid<K, V> 
-  where K : IndexLike + Clone,
-        V : Blank + Clone
-{
-  fn empty(max: &K) -> Grid<K, V> {
-    let s = max.max_index();
-    let cells : Vec<V> = vec![V::blank()].iter().cycle().take(s).cloned().collect();
-    Grid {
-      cells: cells,
-      max: max.clone(),
-    }
-  }
-
-  fn from_cell_iter(iter: &mut Iterator<Item=V>, max: K) -> Option<Grid<K, V>> 
-  {
-    let expected_len = max.max_index() + 1;
-    let cells : Vec<V> = iter.collect();
-    if expected_len == cells.len() {
-      Some(Grid {
-        cells: cells,
-        max: max
-      })
-    } else {
-      None
-    }
-  }
-  fn keys<'a>(&'a self) -> GridIndices<'a, K, V> {
-    GridIndices {
-      grid: self,
-      current: K::from_index(0, &self.max)
-    }
-  }
-
-  fn fmap_mut<T, F>(&mut self, k: &K, f: F) -> T
-    where F: FnOnce(&mut V) -> T {
-    f(&mut self.cells[k.to_index(&self.max)])
-  }
-
-  fn fmap<T, F>(&self, k: &K, f: F) -> T
-    where F: FnOnce(&V) -> T {
-    f(&self.cells[k.to_index(&self.max)])
-  }
-
-  fn map<T, F>(&self, f: F) -> Grid<K, T>
-    where F: Fn(&V) -> T,
-          T: Clone + Blank {
-    let new_cells = self.cells.iter().map(f).collect();
-    Grid{
-      cells: new_cells,
-      max: self.max.clone()
-    }
-  }
-}
-
-fn parse_grid2d(s: &str) -> Result<Grid<Point2d, char>, String> {
-  let s = s.trim_right();
-  match s.chars().position(|c: char| c == '\n') {
-    None => Err("Need at least two lines.".to_string()),
-    Some(line_len) => {
-      let line_count = s.lines().count();
-      for (num, line) in s.lines().enumerate() {
-        let this_line_len = line.chars().count();
-        if this_line_len != line_len {
-          return Err(format!("Line {} is {} chars long instead of {}.", num + 1, this_line_len, line_len));
+impl Space {
+    fn new(width: u64, height: u64, character: char) -> Self {
+        Space {
+            width: width,
+            height: height,
+            character: Some(character)
         }
-      }
-      match Grid::from_cell_iter(&mut s.chars().filter(|c: &char| c.clone() != '\n'), Point2d::new(line_len, line_count)) {
-        Some(g) => Ok(g),
-        None => Err("Unknown error creating grid.".to_string())
-      }
     }
-  }
+
+    fn size(&self) -> u64 {
+        self.width * self.height
+    }
 }
 
-fn print_grid2d(grid: &Grid<Point2d, char>) -> String {
-  let mut out = String::with_capacity(grid.max.max_index());
-  for y in (0..grid.max.y) {
-    for x in (0..grid.max.x) {
-      grid.fmap(&Point2d::new(x, y), |c: &char| out.push(c.clone()));
+impl fmt::Display for Space {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(c) = self.character {
+            write!(f, "Space ({}x{}) with character {}",
+                   self.width, self.height, c)
+        } else {
+            write!(f, "Space ({}x{})", self.width, self.height)
+        }
     }
-    out.push('\n');
-  }
-  out
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BitGrid {
+    bits: u64
+}
+
+impl BitGrid {
+    fn parse(to_extract: char, to_parse: &str) -> Option<(Self, Space)> {
+        let mut bits = 0;
+        let mut index = 0;
+        let mut line_width : Option<u64> = None;
+
+        for line in to_parse.lines() {
+            for c in line.chars() {
+                if c == to_extract {
+                    bits = bits | (1 << index);
+                }
+                index = index + 1;
+            }
+            if let Some(width) = line_width {
+                if index % width != 0 {
+                    return None;
+                }
+            } else {
+                line_width = Some(index);
+            }
+            
+        }
+
+        let line_width = line_width.unwrap_or(index);
+
+        let line_height = if line_width == 0 { 0 } else { index / line_width };
+
+        let space = Space::new(line_width, line_height, to_extract);
+
+        return Some((BitGrid { bits: bits }, space));
+    }
+
+    fn zero() -> Self {
+        return BitGrid { bits: 0 };
+    }
+
+    fn x(&self, s: &Space) -> u8 {
+        if self.bits.count_ones() != 1 {
+            panic!("self for BitGrid::x() should only have one bit set");
+        }
+        (self.bits % s.width) as u8
+    }
+
+    fn y(&self, s: &Space) -> u8 {
+        if self.bits.count_ones() != 1 {
+            panic!("self for BitGrid::y() should only have one bit set");
+        }
+        (self.bits / s.width) as u8
+    }
+}
+
+impl fmt::Display for BitGrid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "BitGrid {{ {:#x} }}", self.bits)
+    }
+}
 
 fn main() {
-  let maze =  "  ###########\n\
-               # ###########\n\
-               #           #\n\
-               # ### ##### #\n\
-               ### #   # # #\n\
-               ###   # # # #\n\
-               #######   # #\n\
-               ########### #";
-  let gmaze = parse_grid2d(maze).unwrap();
-  println!("grid = \n{}", print_grid2d(&gmaze));
+    let pos = "___\n\
+               ___\n\
+               ___\n";
+    if let Some((blanks, blank_space)) = BitGrid::parse('_', pos) {
+        println!("blanks = {}", blanks);
+        println!("blank_space = {}", blank_space);
+    }
 }
