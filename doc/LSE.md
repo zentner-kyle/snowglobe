@@ -1,3 +1,33 @@
+snowglobe
+=========
+
+The snowglobe project is an attempt to create agents capable of general
+intelligence, even if they're not capable of solving common problems like
+computer vision / audio processing / speech synthesis. The general hope here is
+that those specfic fields will progress separately, and this system can be
+adapted to use them.
+
+What exactly we would like the agents to be capable of is still somewhat
+unclear, but here's an initial breakdown:
+  - Planning.
+    - Scheduling.
+    - Cost minimization.
+    - Risk reasoning.
+  - Learning / Modelling.
+    - Causative extraction.
+    - Strategic generalization.
+    - Emotional prediction.
+    - "Self analysis."
+
+The approach of the snowglobe project to achieve this is to attempt to take
+genetic algorithms to their natural conclusion. In other words, to create
+conditions where multiple agents compete for resources such that the desired
+capabilities are developed.
+
+Unfortunately, biologists / anthropologists have relatively little knowledge of
+why these capabilities came about naturally.
+
+
 Learning State Engine (L.S.E.)
 ==============================
 
