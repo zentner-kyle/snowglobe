@@ -78,6 +78,140 @@ Furthermore, we could:
 
 For this project, it looks most reasonable to begin with evaluating the most
 restricted programs where a reasonable learning algorithm can be encoded.
+
+Kinetic
+=======
+
+## Motivation
+It has become clear from various experiments (mental and otherwise), that it
+would be useful to have a language for describing feedback systems capable of
+arbitrarily complex behavior possible in strictly bounded time.
+
+This project began based on the realization that early and non-programmers were
+suprisingly capable at programming state machines. However, existing systems do
+not provide convenient syntax for describing / reasoning about state machines.
+Early programmers are highly reliant on visual indicators of the abstract
+concepts they are reasoning about, so no existing programming system can
+exploit this approach to teaching programs.
+
+For example, the states in a recursive descent parser are best understood as
+the points of execution *between statements*. Transitions are represented as a
+combination of if statements, functions, and while loops (unless tail recursion
+is provided). Similarly, the states in regular expressions are primarily the
+locations *between characters*. Transitions are represented by most characters.
+
+I've encountered few examples of systems where the state is considered
+important enough for language integration:
+  - Falcon, a little known, multi-paradigm language has support for Stateful
+    classes. This is the best treatment of stateful programming I have seen.
+  - GSL, a EDSL in Groovy, the subject of a (possibly only) paper on State
+    Oriented Programming. It does have an example of convergent evolution with
+    Kinetic; it defines `extern` states.
+  - Clojure has agents, which act somewhat like state machines. However,
+    they're intended only as a concurrency primitive.
+  - Scala and Erlang have the actor model, which captures the idea of messages,
+    but states themselves must be managed in the usual imperative way.
+
+However, none of these achieve our goals. In particular, none of them have
+State-Oriented Programming restrictions. Restrictions are an important aspect
+of language design, since they describe what types of advanced generalizations
+are guaranteed to be safe in the language.
+
+Functional programming, for example, guarantees that composition relations are
+described locally, parallelization is always safe (up to termination),
+memoization is always safe, and data-structure sharing is always safe.
+Generally, they also guarantee that value and reference semantics are
+equivalent, eliminating a major source of confusion.
+
+Similar in spirit restrictions for State-Oriented Programming would allow far
+more advanced operations. In particular, consider the restriction of only
+having three functions per state: enter, update, and exit. Furthermore,
+restrict the use of freshly allocated data in the function where it was
+allocated. Preventing recursion (except for some form of inclusion), and
+preventing all loops except for loops and simple conditionals. With these
+restrictions, it is possible to give a strict upper bound on the runtime of any
+program. In fact, the assymptotic runtime of each function can be found
+automatically. Guaranteeing determinism, even in combination with
+parallelization is also readily achievable.
+
+In fact, from a theoretical point of view this is the most restricted class of
+program. Therefore, if a particular class of analysis is possible for any
+language whatsoever, it should be possible for this language.
+
+Since we're interested in synthesis of programs anyways, we may as well
+consider this class of programs. However, we can still have some tools to make
+programming in this environment productive.
+
+## Summary
+
+The type tree of kinetic is as follows:
+
+Here's a BNF grammar describing the type family:
+
+```
+  type ::= number | tag type | homogenous | heterogeneous
+  homogenous ::= '['type';' count ']'
+  heterogeneous ::= '[' type more_types ']'
+  more_types ::= type more_types?
+  count ::= [0-9]*
+  integer ::= (-|+|)[0-9]*
+  number ::= precise | imprecise
+  precise ::= integer | range | exp | frac
+  imprecise ::= (-|+|)[0-9]*'.'[0-9]*'e'(-|+|)[0-9]* // Maybe slightly different, IEEE754 compatible.
+  range ::= '[' integer '..' integer ']' | 'saturating' | 'wrapping'
+  exp ::= (integer | range | frac) '^' range
+  frac ::= (integer | range | exp) '/' exp 
+  positive ::= [1-9] positive?
+  tag ::= symbol ('|' tag)?
+  symbol ::= [A-z_][A-z_0-9]*
+```
+
+As you can see, we have a decent numeric tower, based on the idea that we can
+do relatively precise type inference thanks to the runtime restrictions. The
+above does not specify the inference rules, which are relatively
+straightforward to derive, but quite long. These are intended to provide
+semantics that are easy for humans and computers to reason about, even if the
+actual calculation of the values may not be as fast as possible.
+
+Note that considerable flexibility is snuck into this system by the
+introduction of the tag type, which is a polymorphic tag.
+
+However, values are not the primary concern for reasoning in Kinetic, agents
+are.
+
+Agents are essentially threads which record a 'state', which is not first
+class. Agents themselves are also not first class.
+
+Programs in Kinetic are a directed graph of agents, with additional edges to
+'external agents', which are the method of performing IO.
+
+Each state has some local variables specific to that state. A state also has
+some initial input variables, a function for performing initialization, and a
+function for receiving a message.
+
+Within these functions, new values for local variables can be computed, new
+states can be transitioned to, and messages to known agents can be sent.
+Because agents are not first class, analysis of "fate sharing" can be
+performed, to typecheck the message sends.
+
+When a message send is received, it contains a payload of a known type.
+
+Groups of states can form arbitrary graphs, including loops. It should be
+possible to bound the memory usage of queued messages by analyzing the program.
+
+## Design
+I would like the system to be usable from a large range of skillsets. In
+particular, I'm imagining four forms for any program:
+  - Graphical, probably shown in a browser. Visually represents the
+    calculations of the functions, as well as the two graphs (the state graph
+    and agent graph).
+  - Imperative, with for loops expressed using 'for x in y { }' style syntax.
+  - Functional, with map and reduce functions style manipulation of values.
+  - Array, where operations are described tersely, as in J, K, etc.
+
+Of course, these different disciplines are only cosmetically different for this
+restricted class of programs.
+
 Haku
 ====
 
