@@ -1,0 +1,13 @@
+[package]
+name = "angel-stage-2"
+version = "0.1.0"
+authors = ["Kyle Zentner <zentner.kyle@gmail.com>"]
+build = "build.rs"
+
+[dependencies]
+glium = "0.11.1"
+image = "0.4.*"
+capnp = "0.5.2"
+
+[build-dependencies]
+capnpc = "0.5.*"
