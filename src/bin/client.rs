@@ -3,7 +3,41 @@ extern crate glium;
 extern crate image;
 extern crate capnp;
 
+pub mod common_capnp {
+  include!(concat!(env!("OUT_DIR"), "/common_capnp.rs"));
+}
+
+pub mod update_capnp {
+  include!(concat!(env!("OUT_DIR"), "/update_capnp.rs"));
+}
+
+pub mod command_capnp {
+  include!(concat!(env!("OUT_DIR"), "/command_capnp.rs"));
+}
+
+use glium::backend::glutin_backend::GlutinFacade;
+use glium::{Surface};
+
+type Display = glium::backend::glutin_backend::GlutinFacade;
+
 use std::fs::File;
+use std::io::Read;
+use std::collections::{HashMap};
+use std::rc::Rc;
+use std::borrow::Borrow;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+
+#[derive(Debug)]
+enum LoadError {
+    Io(String, std::io::Error),
+    Glium(String),
+    Image(image::ImageError),
+    Client(String)
+}
+
+type LoadResult<R> = Result<R, LoadError>;
+
+type Mat4 = [[f32; 4]; 4];
 
 #[derive(Copy, Clone)]
 struct Vertex {
@@ -14,101 +48,144 @@ struct Vertex {
 
 implement_vertex!(Vertex, position, normal, tex_coords);
 
-fn main() {
-    use glium::{DisplayBuild, Surface};
-    let display = glium::glutin::WindowBuilder::new()
-                        .with_depth_buffer(24)
-                        .build_glium().unwrap();
+fn open_file(path: &str) -> LoadResult<File> {
+    File::open(path)
+        .map_err(|e| LoadError::Io(path.to_owned(), e))
+}
 
+fn read_file_to_string(path: &str) -> LoadResult<String> {
+    let mut out_string = String::new();
+    open_file(path)
+        .and_then(|mut file| {
+            file.read_to_string(&mut out_string)
+                .map_err(|e| LoadError::Io(path.to_owned(), e))
+        })
+        .map(move |_| out_string)
+}
 
-    let shape = glium::vertex::VertexBuffer::new(&display, &[
+fn load_shaders(display: &Display, path: &str) -> LoadResult<glium::Program> {
+    let vertex_src = try!(read_file_to_string(&format!("shaders/{}.vert", path)));
+    let fragment_src = try!(read_file_to_string(&format!("shaders/{}.frag", path)));
+    glium::Program::from_source(display, &vertex_src, &fragment_src, None)
+        .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
+}
+
+struct Appearance {
+    shaders: glium::Program,
+    shape: glium::VertexBuffer<Vertex>,
+    diffuse_map: glium::texture::Texture2d,
+    normal_map: Option<glium::texture::Texture2d>
+}
+
+fn load_texture(display: &Display, path: &str) -> LoadResult<glium::texture::Texture2d> {
+    open_file(path)
+        .and_then(|mut file| {
+            image::load(file, image::PNG)
+                .map_err(|e| LoadError::Image(e))
+        })
+        .and_then(|img| {
+            glium::texture::Texture2d::new(display, img)
+                .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
+        })
+}
+
+impl Appearance {
+    fn load(display: &Display, name: &str) -> LoadResult<Appearance> {
+        let diffuse = try!(load_texture(display, &format!("assets/{}.png", name)));
+        let normal = load_texture(display, &format!("assets/{}-normal.png", name)).ok();
+
+        let shape = try!(glium::vertex::VertexBuffer::new(display, &[
             Vertex { position: [-1.0,  1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [0.0, 1.0] },
             Vertex { position: [ 1.0,  1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [1.0, 1.0] },
             Vertex { position: [-1.0, -1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [0.0, 0.0] },
             Vertex { position: [ 1.0, -1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [1.0, 0.0] },
-        ]).unwrap();
+        ])
+            .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e))));
 
-    let image = image::load(File::open("assets/tuto-14-diffuse.jpg").unwrap(),
-                            image::JPEG).unwrap();
-    let diffuse_texture = glium::texture::Texture2d::new(&display, image).unwrap();
+        load_shaders(display, "simple")
+            .map(|prog| {
+                Appearance {
+                    shaders: prog,
+                    shape: shape,
+                    diffuse_map: diffuse,
+                    normal_map: normal,
+                }
+            })
+    }
 
-    let image = image::load(File::open("assets/tuto-14-normal.png").unwrap(),
-                            image::PNG).unwrap();
-    let normal_map = glium::texture::Texture2d::new(&display, image as image::DynamicImage).unwrap();
+    fn render(&self, target: &mut glium::Frame, model: &Mat4, view: &Mat4, perspective: &Mat4, light: &[f32; 3]) -> Result<(), glium::DrawError> {
+        let params = glium::DrawParameters {
+            depth: glium::Depth {
+                test: glium::draw_parameters::DepthTest::IfLess,
+                write: true,
+                .. Default::default()
+            },
+            .. Default::default()
+        };
 
-    let vertex_shader_src = r#"
-        #version 130
-        in vec3 position;
-        in vec3 normal;
-        in vec2 tex_coords;
-        out vec3 v_normal;
-        out vec3 v_position;
-        out vec2 v_tex_coords;
-        uniform mat4 perspective;
-        uniform mat4 view;
-        uniform mat4 model;
-        void main() {
-            v_tex_coords = tex_coords;
-            mat4 modelview = view * model;
-            v_normal = transpose(inverse(mat3(modelview))) * normal;
-            gl_Position = perspective * modelview * vec4(position, 1.0);
-            v_position = gl_Position.xyz / gl_Position.w;
+        let normal_tex = match self.normal_map {
+            Some(ref map) => map,
+            None => &self.diffuse_map
+        };
+        target.draw(&self.shape, glium::index::NoIndices(glium::index::PrimitiveType::TriangleStrip), &self.shaders,
+                    &uniform! { model: model.clone(), view: view.clone(), perspective: perspective.clone(),
+                                u_light: light.clone(), diffuse_tex: &self.diffuse_map, normal_tex: normal_tex },
+                    &params)
+    }
+}
+
+struct AppearanceCache {
+    loaded: HashMap<Rc<String>, Appearance>,
+}
+
+impl AppearanceCache {
+    fn new() -> Self {
+        AppearanceCache {
+            loaded: HashMap::new()
         }
-    "#;
+    }
 
-    let fragment_shader_src = r#"
-        #version 130
-        in vec3 v_normal;
-        in vec3 v_position;
-        in vec2 v_tex_coords;
-        out vec4 color;
-        uniform vec3 u_light;
-        uniform sampler2D diffuse_tex;
-        uniform sampler2D normal_tex;
-        const vec3 specular_color = vec3(1.0, 1.0, 1.0);
-        mat3 cotangent_frame(vec3 normal, vec3 pos, vec2 uv) {
-            vec3 dp1 = dFdx(pos);
-            vec3 dp2 = dFdy(pos);
-            vec2 duv1 = dFdx(uv);
-            vec2 duv2 = dFdy(uv);
-            vec3 dp2perp = cross(dp2, normal);
-            vec3 dp1perp = cross(normal, dp1);
-            vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-            vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-            float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
-            return mat3(T * invmax, B * invmax, normal);
+    fn get<'a>(&'a mut self, display: &Display, name: Rc<String>) -> LoadResult<&'a Appearance> {
+        match self.loaded.entry(name.clone()) {
+            Occupied(e) => Ok(e.into_mut()),
+            Vacant(mut e) => {
+                let to_insert = try!(Appearance::load(display, name.as_ref()));
+                Ok(e.insert(to_insert))
+            }
         }
-        void main() {
-            vec3 diffuse_color = texture(diffuse_tex, v_tex_coords).rgb;
-            vec3 ambient_color = diffuse_color * 0.1;
-            vec3 normal_map = texture(normal_tex, v_tex_coords).rgb;
-            mat3 tbn = cotangent_frame(v_normal, v_position, v_tex_coords);
-            vec3 real_normal = normalize(tbn * -(normal_map * 2.0 - 1.0));
-            float diffuse = max(dot(real_normal, normalize(u_light)), 0.0);
-            vec3 camera_dir = normalize(-v_position);
-            vec3 half_direction = normalize(normalize(u_light) + camera_dir);
-            float specular = pow(max(dot(half_direction, real_normal), 0.0), 16.0);
-            color = vec4(ambient_color + diffuse * diffuse_color + specular * specular_color, 1.0);
+    }
+}
+
+struct EntityInfo {
+    identity: u64,
+    location: [f32; 3],
+    appearance: Rc<String>
+}
+
+impl EntityInfo {
+    fn new(identity: u64, location: [f32; 3], appearance: Rc<String>) -> EntityInfo {
+        EntityInfo {
+            identity: identity,
+            location: location.clone(),
+            appearance: appearance
         }
-    "#;
+    }
+}
 
-    let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src,
-                                              None).unwrap();
+struct Scene {
+    view_position: [f32; 3],
+    light: [f32; 3],
+    entities: HashMap<u64, EntityInfo>
+}
 
-    let mut time : f32 = 0.0;
-    loop {
-        time += 0.01;
+impl Scene {
+    fn render(&self, display: &Display, appearance_cache: &mut AppearanceCache) -> LoadResult<()> {
+
+        use glium::{Surface};
         let mut target = display.draw();
         target.clear_color_and_depth((0.0, 0.0, 0.0, 0.0), 1e16);
 
-        let model = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, -10.0, 1.0f32]
-        ];
-
-        let view = view_matrix(&[0.0, 0.0, 1.0], &[0.0, 0.0, -1.0], &[0.0, 1.0, 0.0]);
+        let view = view_matrix(&self.view_position, &[0.0, 0.0, 1.0], &[0.0, 1.0, 0.0]);
 
         let perspective = {
             let (width, height) = target.get_dimensions();
@@ -128,23 +205,42 @@ fn main() {
             ]
         };
 
-        let light = [1.4, 0.4, 0.7f32];
+        for (_, entity) in self.entities.iter() {
+            let model = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [entity.location[0], entity.location[1], entity.location[2], 1.0f32]
+            ];
+            appearance_cache.get(display, entity.appearance.clone())
+                .and_then(|app| {
+                    app.render(&mut target, &model, &view, &perspective, &self.light)
+                    .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
+                 })
+                .unwrap();
+        }
+        target.finish()
+            .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
+    }
+}
 
-        let params = glium::DrawParameters {
-            depth: glium::Depth {
-                test: glium::draw_parameters::DepthTest::IfLess,
-                write: true,
-                .. Default::default()
-            },
-            .. Default::default()
-        };
+fn main() {
+    use glium::{DisplayBuild, Surface};
+    let display = glium::glutin::WindowBuilder::new()
+                        .with_depth_buffer(24)
+                        .build_glium().unwrap();
+    let mut scene = Scene {
+        view_position: [0.0, 0.0, -10.0],
+        light: [1.4, 0.4, 0.7f32],
+        entities: HashMap::new()
+    };
 
-        target.draw(&shape, glium::index::NoIndices(glium::index::PrimitiveType::TriangleStrip), &program,
-                    &uniform! { model: model, view: view, perspective: perspective,
-                                u_light: light, diffuse_tex: &diffuse_texture, normal_tex: &normal_map },
-                    &params).unwrap();
-        target.finish().unwrap();
+    scene.entities.insert(0, EntityInfo::new(0, [0.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
 
+    let mut appearance_cache = AppearanceCache::new();
+
+    loop {
+        scene.render(&display, &mut appearance_cache);
         for ev in display.poll_events() {
             match ev {
                 glium::glutin::Event::Closed => return,

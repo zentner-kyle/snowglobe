@@ -4,5 +4,6 @@ using Common = import "common.capnp";
 struct Command @0xc1ac26dba21792f8 {
   union {
     move @0 :Common.Point;
+    action @1 :UInt8;
   }
 }

@@ -2,12 +2,14 @@
 using Common = import "common.capnp";
 
 struct EntityInfo @0xea20abdb567ef1f2 {
-  location @0 :Common.Point;  
-  appearance @0 :Text;
+  identity @0 :UInt64;
+  location @1 :Common.Point;  
+  appearance @2 :Text;
 }
 
 struct Update @0xeba1194f653a39f1 {
   union {
-    entity_exists @0 :EntityInfo;
+    entityAlive @0 :EntityInfo;
+    entityDead @1 :UInt64;
   }
 }
