@@ -2,6 +2,8 @@
 extern crate glium;
 extern crate image;
 extern crate capnp;
+extern crate mio;
+extern crate clap;
 
 pub mod common_capnp {
   include!(concat!(env!("OUT_DIR"), "/common_capnp.rs"));
@@ -222,6 +224,23 @@ impl Scene {
 
 fn main() {
     use glium::{DisplayBuild};
+    use clap::{Arg, App};
+    let matches = App::new("angel-stage-2")
+        .version("0.1")
+        .author("Kyle R. Zentner <zentner.kyle@gmail.com>")
+        .about("Strategy game.")
+        .arg(Arg::with_name("server")
+            .short("s")
+            .long("server")
+            .value_name("address")
+            .help("Sets the server to use")
+            .takes_value(true))
+        .get_matches();
+
+    let server = matches.value_of("server").unwrap_or("127.0.0.1:4410");
+
+    println!("Connecting to server at {}", server);
+
     let display = glium::glutin::WindowBuilder::new()
                         .with_depth_buffer(24)
                         .build_glium().unwrap();
@@ -238,6 +257,7 @@ fn main() {
 
     loop {
         scene.render(&display, &mut appearance_cache).unwrap();
+
         for ev in display.poll_events() {
             match ev {
                 glium::glutin::Event::Closed => return,
