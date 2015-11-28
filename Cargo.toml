@@ -8,6 +8,8 @@ build = "build.rs"
 glium = "0.11.1"
 image = "0.4.*"
 capnp = "0.5.2"
+clap = "1.5.*"
+mio = "0.4.*"
 
 [build-dependencies]
 capnpc = "0.5.*"
