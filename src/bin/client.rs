@@ -24,15 +24,13 @@ use std::fs::File;
 use std::io::Read;
 use std::collections::{HashMap};
 use std::rc::Rc;
-use std::borrow::Borrow;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 
 #[derive(Debug)]
 enum LoadError {
     Io(String, std::io::Error),
     Glium(String),
-    Image(image::ImageError),
-    Client(String)
+    Image(image::ImageError)
 }
 
 type LoadResult<R> = Result<R, LoadError>;
@@ -79,7 +77,7 @@ struct Appearance {
 
 fn load_texture(display: &Display, path: &str) -> LoadResult<glium::texture::Texture2d> {
     open_file(path)
-        .and_then(|mut file| {
+        .and_then(|file| {
             image::load(file, image::PNG)
                 .map_err(|e| LoadError::Image(e))
         })
@@ -148,7 +146,7 @@ impl AppearanceCache {
     fn get<'a>(&'a mut self, display: &Display, name: Rc<String>) -> LoadResult<&'a Appearance> {
         match self.loaded.entry(name.clone()) {
             Occupied(e) => Ok(e.into_mut()),
-            Vacant(mut e) => {
+            Vacant(e) => {
                 let to_insert = try!(Appearance::load(display, name.as_ref()));
                 Ok(e.insert(to_insert))
             }
@@ -157,15 +155,13 @@ impl AppearanceCache {
 }
 
 struct EntityInfo {
-    identity: u64,
     location: [f32; 3],
     appearance: Rc<String>
 }
 
 impl EntityInfo {
-    fn new(identity: u64, location: [f32; 3], appearance: Rc<String>) -> EntityInfo {
+    fn new(location: [f32; 3], appearance: Rc<String>) -> EntityInfo {
         EntityInfo {
-            identity: identity,
             location: location.clone(),
             appearance: appearance
         }
@@ -225,7 +221,7 @@ impl Scene {
 }
 
 fn main() {
-    use glium::{DisplayBuild, Surface};
+    use glium::{DisplayBuild};
     let display = glium::glutin::WindowBuilder::new()
                         .with_depth_buffer(24)
                         .build_glium().unwrap();
@@ -235,12 +231,13 @@ fn main() {
         entities: HashMap::new()
     };
 
-    scene.entities.insert(0, EntityInfo::new(0, [0.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
+    scene.entities.insert(0, EntityInfo::new([0.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
+    scene.entities.insert(1, EntityInfo::new([2.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
 
     let mut appearance_cache = AppearanceCache::new();
 
     loop {
-        scene.render(&display, &mut appearance_cache);
+        scene.render(&display, &mut appearance_cache).unwrap();
         for ev in display.poll_events() {
             match ev {
                 glium::glutin::Event::Closed => return,
