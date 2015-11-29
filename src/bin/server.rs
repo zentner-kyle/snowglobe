@@ -18,11 +18,10 @@ pub mod command_capnp {
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap};
 use std::collections::{BinaryHeap};
-use std::rc::Rc;
-use std::str::FromStr;
+//use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::channel;
-use std::thread;
+//use std::sync::mpsc::channel;
+//use std::thread;
 
 const COMMAND: mio::Token = mio::Token(0);
 
@@ -42,7 +41,7 @@ fn main() {
 
     let address = matches.value_of("address").unwrap_or("127.0.0.1:4410");
 
-    println!("Starting server at {}", address);
+    println!("Starting server ({})", address);
 
     let addr = address.parse().unwrap();
 
@@ -79,8 +78,12 @@ fn start_simulation(event_loop: &mut mio::EventLoop<ServerHandler>, socket: mio:
     std::thread::spawn(move || {
         {
             let mut world = simulation_world.lock().unwrap();
-            world.entities.insert(0, Entity::new([0.0, 0.0, 0.0f32], Arc::new("simple".to_owned())));
-            world.entities.insert(1, Entity::new([2.0, 0.0, 0.0f32], Arc::new("simple".to_owned())));
+            let simple_appearance = Arc::new("simple".to_owned());
+            for i in 0..100 {
+                world.entities.insert(i, Entity::new([0.0, 0.0, 0.0f32], simple_appearance.clone()));
+            }
+            //world.entities.insert(0, Entity::new([0.0, 0.0, 0.0f32], Arc::new("simple".to_owned())));
+            //world.entities.insert(1, Entity::new([2.0, 0.0, 0.0f32], Arc::new("simple".to_owned())));
         }
 
         let mut t = 0.0f32;
@@ -88,9 +91,12 @@ fn start_simulation(event_loop: &mut mio::EventLoop<ServerHandler>, socket: mio:
             std::thread::sleep(std::time::Duration::from_millis(1));
             {
                 let mut world = simulation_world.lock().unwrap();
-                if let Some(e) = world.entities.get_mut(&0) {
-                    e.location[0] = f32::cos(t);
-                    e.location[1] = f32::sin(t);
+                for i in 0..100 {
+                    if let Some(e) = world.entities.get_mut(&i) {
+                        let i = i as f32;
+                        e.location[0] = 10.0 * f32::sin(0.1 * t) * (i / 300.0) * f32::cos(t + i);
+                        e.location[1] = 10.0 * f32::sin(0.1 * t) * (3.0 / (1.0 + i)) * f32::sin(t + i) + 4.0 * (f32::sin(t) - 0.5);
+                    }
                 }
             }
             t += 0.001f32;
@@ -153,7 +159,7 @@ struct ServerHandler {
     subscription_priorities: BinaryHeap<ClientPriority>
 }
 
-const BUFFER_SIZE : usize = 4096;
+const BUFFER_SIZE : usize = 65535;
 
 impl ServerHandler {
     fn new(socket: mio::udp::UdpSocket, world: Arc<Mutex<World>>) -> Self {
@@ -183,6 +189,7 @@ impl ServerHandler {
         let maybe_addr : Option<std::net::SocketAddr> = try!(self.socket.recv_from(&mut in_buf)
                                                              .map_err(|e| ServerError::Io("COMMAND".to_owned(), e)));
         let addr = try!(maybe_addr.ok_or(ServerError::Intermittent));
+        //println!("Receiving message from {}", &addr);
         let reader = try!(serialize::read_message(&mut in_buf.flip(),
                                                   ::capnp::message::ReaderOptions::new())
                           .map_err(|e| ServerError::Capnp(e)));
@@ -197,11 +204,11 @@ impl ServerHandler {
                         },
                         Vacant(e) => {
                             e.insert(ClientState { position: parse_point(mov) });
+                            println!("Client ({}) connected.", &addr);
                             self.subscription_priorities.push(ClientPriority {
                                 priority: 100,
                                 address: addr
                             });
-                            println!("Client connected.");
                         }
                     }
                     return Ok(());
@@ -216,7 +223,6 @@ impl ServerHandler {
         }
     }
     fn send_best_update(&mut self) -> ServerResult<()> {
-        use capnp::serialize;
         if let Some(mut client) = self.subscription_priorities.pop() {
             client.priority -= 1;
             let world = self.world.lock().unwrap();
@@ -236,8 +242,10 @@ impl ServerHandler {
                 }
             }
             let mut out_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
-            serialize::write_message(&mut out_buf, &message).unwrap();
-            self.socket.send_to(&mut out_buf.flip(), &client.address).unwrap();
+            capnp::serialize::write_message(&mut out_buf, &message).unwrap();
+            let mut to_send = &mut out_buf.flip();
+            //println!("Sending message ({} bytes) to {}", mio::Buf::remaining(to_send), &client.address);
+            self.socket.send_to(to_send, &client.address).unwrap();
             self.subscription_priorities.push(client);
         }
         std::thread::sleep(std::time::Duration::from_millis(15));

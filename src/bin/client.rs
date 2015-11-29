@@ -23,14 +23,12 @@ use glium::{Surface};
 
 type Display = glium::backend::glutin_backend::GlutinFacade;
 
-use std::collections::binary_heap::{BinaryHeap};
 use std::collections::{HashMap};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::fs::File;
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::channel;
 use std::thread;
 
 #[derive(Debug)]
@@ -187,13 +185,11 @@ struct Scene {
 }
 
 impl Scene {
-    fn render(&self, display: &Display, appearance_cache: &mut AppearanceCache) -> LoadResult<()> {
-
+    fn lock_and_render_scene(scene: &Arc<Mutex<Scene>>, display: &Display, appearance_cache: &mut
+                             AppearanceCache) -> LoadResult<()> {
         use glium::{Surface};
         let mut target = display.draw();
         target.clear_color_and_depth((0.0, 0.0, 0.0, 0.0), 1e16);
-
-        let view = view_matrix(&self.view_position, &[0.0, 0.0, 1.0], &[0.0, 1.0, 0.0]);
 
         let perspective = {
             let (width, height) = target.get_dimensions();
@@ -213,19 +209,24 @@ impl Scene {
             ]
         };
 
-        for (_, entity) in self.entities.iter() {
-            let model = [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [entity.location[0], entity.location[1], entity.location[2], 1.0f32]
-            ];
-            appearance_cache.get(display, entity.appearance.clone())
-                .and_then(|app| {
-                    app.render(&mut target, &model, &view, &perspective, &self.light)
-                    .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
-                 })
-                .unwrap();
+        {
+            let scene = scene.lock().unwrap();
+            let view = view_matrix(&scene.view_position, &[0.0, 0.0, 1.0], &[0.0, 1.0, 0.0]);
+
+            for (_, entity) in scene.entities.iter() {
+                let model = [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [entity.location[0], entity.location[1], entity.location[2], 1.0f32]
+                ];
+                appearance_cache.get(display, entity.appearance.clone())
+                    .and_then(|app| {
+                        app.render(&mut target, &model, &view, &perspective, &scene.light)
+                        .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
+                    })
+                    .unwrap();
+            }
         }
         target.finish()
             .map_err(|e| LoadError::Glium(format!("glium error: {:?}", e)))
@@ -249,7 +250,7 @@ fn main() {
 
     let server = matches.value_of("server").unwrap_or("127.0.0.1:4410").parse().unwrap();
 
-    println!("Connecting to server at {}", server);
+    println!("Connecting to server ({})", server);
 
     let display = glium::glutin::WindowBuilder::new()
                         .with_depth_buffer(24)
@@ -275,22 +276,23 @@ fn main() {
     let mut total_wait = 0u64;
     let mut start_of_second = time::SteadyTime::now();
     let mut frames_this_second = 0;
-    let mut fps = 0;
     loop {
         let now = time::SteadyTime::now();
         if now + time::Duration::milliseconds(1) > last_render_time + frame_duration {
             last_render_time = time::SteadyTime::now();
-            scene.lock().unwrap().render(&display, &mut appearance_cache).unwrap();
+            Scene::lock_and_render_scene(&scene, &display, &mut appearance_cache).unwrap();
+            //println!("rendering took {} milliseconds",
+                     //(time::SteadyTime::now() - last_render_time).num_milliseconds());
             frames_this_second += 1;
             if now >= start_of_second + time::Duration::seconds(1) {
-                fps = frames_this_second;
-                frames_this_second = 0;
-                start_of_second = now;
                 display.get_window()
                     .map(|w| {
-                        let title = format!("snowglobe ({} fps) ({}ms avg. slack / frame)", fps, total_wait / nframes);
+                        let title = format!("snowglobe ({} fps) ({}ms avg. slack / frame)",
+                                            frames_this_second, total_wait / nframes);
                         w.set_title(&title)
                     });
+                frames_this_second = 0;
+                start_of_second = now;
             }
         } else {
             let wait_time = (last_render_time + frame_duration - now).num_milliseconds() as u64;
@@ -344,7 +346,7 @@ fn view_matrix(position: &[f32; 3], direction: &[f32; 3], up: &[f32; 3]) -> [[f3
 }
 
 const SERVER: mio::Token = mio::Token(0);
-const BUFFER_SIZE : usize = 4096;
+const BUFFER_SIZE : usize = 65535;
 
 fn parse_point(point: common_capnp::point::Reader) -> [f32; 3] {
     [point.get_x(), point.get_y(), point.get_z()]
@@ -369,12 +371,15 @@ impl ClientHandler {
         let maybe_addr : Option<std::net::SocketAddr> = try!(self.socket.recv_from(&mut in_buf)
                                                              .map_err(|e| ClientError::Io("SERVER".to_owned(), e)));
         let addr = try!(maybe_addr.ok_or(ClientError::Intermittent));
+        //println!("Receiving message from {}", &addr);
         let reader = try!(serialize::read_message(&mut in_buf.flip(),
                                                   ::capnp::message::ReaderOptions::new())
                           .map_err(|e| ClientError::Capnp(e)));
         let message = try!(reader.get_root::<update_capnp::client_message::Reader>()
                            .map_err(|e| ClientError::Capnp(e)));
         let mut err = None;
+
+        let mut scene = self.scene.lock().unwrap();
         for update in try!(message.get_updates()
                            .map_err(|e| ClientError::Capnp(e))).iter() {
             match update.which() {
@@ -384,7 +389,6 @@ impl ClientHandler {
                                         .map_err(|e| ClientError::Capnp(e))));
                     let appearance = try!(info.get_appearance()
                                           .map_err(|e| ClientError::Capnp(e)));
-                    let mut scene = self.scene.lock().unwrap();
                     match scene.entities.entry(identity) {
                         Vacant(mut entry) => {
                             entry.insert(EntityInfo::new(location, Arc::new(appearance.to_owned())));
@@ -399,7 +403,6 @@ impl ClientHandler {
                     }
                 },
                 Ok(update_capnp::update::EntityDead(identity)) => {
-                    let mut scene = self.scene.lock().unwrap();
                     scene.entities.remove(&identity);
                 }
                 Ok(update_capnp::update::EntityAlive(Err(e))) => {
@@ -469,6 +472,7 @@ impl mio::Handler for ClientHandler {
                 }
                 let mut out_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
                 capnp::serialize::write_message(&mut out_buf, &message).unwrap();
+                //println!("Sending message to {}", &self.server_address);
                 self.socket.send_to(&mut out_buf.flip(), &self.server_address).unwrap();
             }
         }
