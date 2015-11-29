@@ -4,6 +4,7 @@ extern crate image;
 extern crate capnp;
 extern crate mio;
 extern crate clap;
+extern crate time;
 
 pub mod common_capnp {
   include!(concat!(env!("OUT_DIR"), "/common_capnp.rs"));
@@ -22,11 +23,15 @@ use glium::{Surface};
 
 type Display = glium::backend::glutin_backend::GlutinFacade;
 
+use std::collections::binary_heap::{BinaryHeap};
+use std::collections::{HashMap};
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::fs::File;
 use std::io::Read;
-use std::collections::{HashMap};
-use std::rc::Rc;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::channel;
+use std::thread;
 
 #[derive(Debug)]
 enum LoadError {
@@ -134,8 +139,13 @@ impl Appearance {
     }
 }
 
+#[derive(Clone)]
+enum CommandEvent {
+    Move([f32; 3])
+}
+
 struct AppearanceCache {
-    loaded: HashMap<Rc<String>, Appearance>,
+    loaded: HashMap<Arc<String>, Appearance>,
 }
 
 impl AppearanceCache {
@@ -145,7 +155,7 @@ impl AppearanceCache {
         }
     }
 
-    fn get<'a>(&'a mut self, display: &Display, name: Rc<String>) -> LoadResult<&'a Appearance> {
+    fn get<'a>(&'a mut self, display: &Display, name: Arc<String>) -> LoadResult<&'a Appearance> {
         match self.loaded.entry(name.clone()) {
             Occupied(e) => Ok(e.into_mut()),
             Vacant(e) => {
@@ -158,11 +168,11 @@ impl AppearanceCache {
 
 struct EntityInfo {
     location: [f32; 3],
-    appearance: Rc<String>
+    appearance: Arc<String>
 }
 
 impl EntityInfo {
-    fn new(location: [f32; 3], appearance: Rc<String>) -> EntityInfo {
+    fn new(location: [f32; 3], appearance: Arc<String>) -> EntityInfo {
         EntityInfo {
             location: location.clone(),
             appearance: appearance
@@ -237,26 +247,57 @@ fn main() {
             .takes_value(true))
         .get_matches();
 
-    let server = matches.value_of("server").unwrap_or("127.0.0.1:4410");
+    let server = matches.value_of("server").unwrap_or("127.0.0.1:4410").parse().unwrap();
 
     println!("Connecting to server at {}", server);
 
     let display = glium::glutin::WindowBuilder::new()
                         .with_depth_buffer(24)
+                        .with_gl(glium::glutin::GlRequest::Latest)
+                        .with_vsync()
+                        .with_title("snowglobe".to_owned())
                         .build_glium().unwrap();
-    let mut scene = Scene {
+
+    let mut scene = Arc::new(Mutex::new(Scene {
         view_position: [0.0, 0.0, -10.0],
         light: [1.4, 0.4, 0.7f32],
         entities: HashMap::new()
-    };
+    }));
 
-    scene.entities.insert(0, EntityInfo::new([0.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
-    scene.entities.insert(1, EntityInfo::new([2.0, 0.0, 0.0f32], Rc::new("simple".to_owned())));
+    let command_sender = connect_to_server(server, scene.clone());
+    command_sender.send(CommandEvent::Move([0.0, 0.0, 0.0f32]));
 
     let mut appearance_cache = AppearanceCache::new();
 
+    let mut last_render_time = time::SteadyTime::now();
+    let frame_duration = time::Duration::seconds(1) / 60;
+    let mut nframes = 0u64; 
+    let mut total_wait = 0u64;
+    let mut start_of_second = time::SteadyTime::now();
+    let mut frames_this_second = 0;
+    let mut fps = 0;
     loop {
-        scene.render(&display, &mut appearance_cache).unwrap();
+        let now = time::SteadyTime::now();
+        if now + time::Duration::milliseconds(1) > last_render_time + frame_duration {
+            last_render_time = time::SteadyTime::now();
+            scene.lock().unwrap().render(&display, &mut appearance_cache).unwrap();
+            frames_this_second += 1;
+            if now >= start_of_second + time::Duration::seconds(1) {
+                fps = frames_this_second;
+                frames_this_second = 0;
+                start_of_second = now;
+                display.get_window()
+                    .map(|w| {
+                        let title = format!("snowglobe ({} fps) ({}ms avg. slack / frame)", fps, total_wait / nframes);
+                        w.set_title(&title)
+                    });
+            }
+        } else {
+            let wait_time = (last_render_time + frame_duration - now).num_milliseconds() as u64;
+            total_wait += wait_time;
+            nframes += 1;
+            std::thread::sleep(std::time::Duration::from_millis(wait_time));
+        }
 
         for ev in display.poll_events() {
             match ev {
@@ -300,4 +341,163 @@ fn view_matrix(position: &[f32; 3], direction: &[f32; 3], up: &[f32; 3]) -> [[f3
         [s[2], u[2], f[2], 0.0],
         [p[0], p[1], p[2], 1.0],
     ]
+}
+
+const SERVER: mio::Token = mio::Token(0);
+const BUFFER_SIZE : usize = 4096;
+
+fn parse_point(point: common_capnp::point::Reader) -> [f32; 3] {
+    [point.get_x(), point.get_y(), point.get_z()]
+}
+
+fn write_point(p: &mut common_capnp::point::Builder, point: &[f32; 3]) {
+    p.set_x(point[0]);
+    p.set_y(point[1]);
+    p.set_z(point[2]);
+}
+
+struct ClientHandler {
+    socket: mio::udp::UdpSocket,
+    server_address: std::net::SocketAddr,
+    scene: Arc<Mutex<Scene>>,
+}
+
+impl ClientHandler {
+    fn process_client_messsage(&mut self) -> ClientResult<()> {
+        use capnp::serialize;
+        let mut in_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
+        let maybe_addr : Option<std::net::SocketAddr> = try!(self.socket.recv_from(&mut in_buf)
+                                                             .map_err(|e| ClientError::Io("SERVER".to_owned(), e)));
+        let addr = try!(maybe_addr.ok_or(ClientError::Intermittent));
+        let reader = try!(serialize::read_message(&mut in_buf.flip(),
+                                                  ::capnp::message::ReaderOptions::new())
+                          .map_err(|e| ClientError::Capnp(e)));
+        let message = try!(reader.get_root::<update_capnp::client_message::Reader>()
+                           .map_err(|e| ClientError::Capnp(e)));
+        let mut err = None;
+        for update in try!(message.get_updates()
+                           .map_err(|e| ClientError::Capnp(e))).iter() {
+            match update.which() {
+                Ok(update_capnp::update::EntityAlive(Ok(info))) => {
+                    let identity = info.get_identity();
+                    let location = parse_point(try!(info.get_location()
+                                        .map_err(|e| ClientError::Capnp(e))));
+                    let appearance = try!(info.get_appearance()
+                                          .map_err(|e| ClientError::Capnp(e)));
+                    let mut scene = self.scene.lock().unwrap();
+                    match scene.entities.entry(identity) {
+                        Vacant(mut entry) => {
+                            entry.insert(EntityInfo::new(location, Arc::new(appearance.to_owned())));
+                        },
+                        Occupied(mut entry) => {
+                            let entity = entry.get_mut();
+                            entity.location = location;
+                            if *entity.appearance != appearance {
+                                entity.appearance = Arc::new(appearance.to_owned());
+                            }
+                        }
+                    }
+                },
+                Ok(update_capnp::update::EntityDead(identity)) => {
+                    let mut scene = self.scene.lock().unwrap();
+                    scene.entities.remove(&identity);
+                }
+                Ok(update_capnp::update::EntityAlive(Err(e))) => {
+                    err = Some(ClientError::Capnp(e));
+                },
+                Err(capnp::NotInSchema(_)) => {
+                    err = Some(ClientError::Intermittent);
+                },
+            }
+        }
+        match err {
+            None => Ok(()),
+            Some(e) => Err(e)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ClientError {
+    Io(String, std::io::Error),
+    Intermittent,
+    Capnp(capnp::Error),
+    Parse(String)
+}
+
+type ClientResult<R> = Result<R, ClientError>;
+
+fn print_error<T>(res: ClientResult<T>) {
+    if let Err(e) = res {
+        match e {
+            ClientError::Intermittent => {
+            },
+            _ => {
+                println!("Error: {:?}", e);
+            }
+        }
+    }
+}
+
+
+impl mio::Handler for ClientHandler {
+    type Timeout = ();
+    type Message = CommandEvent;
+
+    fn ready(&mut self, event_loop: &mut mio::EventLoop<ClientHandler>, token: mio::Token, events: mio::EventSet) {
+        match token {
+            SERVER => {
+                if events.is_readable() {
+                    print_error(self.process_client_messsage());
+                }
+                else {
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                }
+            },
+            _ => panic!("unexpected token"),
+        }
+    }
+
+    fn notify(&mut self, event_loop: &mut mio::EventLoop<ClientHandler>, msg: CommandEvent) {
+        match msg {
+            CommandEvent::Move(loc) => {
+                let mut message = capnp::message::Builder::new_default();
+                {
+                    let mut command = message.init_root::<command_capnp::command::Builder>();
+                    let mut move_command = command.init_move();
+                    write_point(&mut move_command, &loc);
+                }
+                let mut out_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
+                capnp::serialize::write_message(&mut out_buf, &message).unwrap();
+                self.socket.send_to(&mut out_buf.flip(), &self.server_address).unwrap();
+            }
+        }
+    }
+}
+
+fn connect_to_server(addr: std::net::SocketAddr, scene: Arc<Mutex<Scene>>) -> mio::Sender<CommandEvent> {
+    let addr_copy = addr.clone();
+    let scene_copy = scene.clone();
+
+    let mut event_loop = mio::EventLoop::new().unwrap();
+
+    let sender = event_loop.channel();
+
+    std::thread::spawn(move || {
+        let client = match &addr_copy {
+            &std::net::SocketAddr::V4(_) => mio::udp::UdpSocket::v4().unwrap(),
+            &std::net::SocketAddr::V6(_) => mio::udp::UdpSocket::v6().unwrap()
+        };
+
+        event_loop.register(&client, SERVER);
+
+        let mut handler = ClientHandler {
+            socket: client,
+            server_address: addr_copy,
+            scene: scene_copy,
+        };
+
+        event_loop.run(&mut handler).unwrap();
+    });
+    sender
 }

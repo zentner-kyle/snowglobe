@@ -1,5 +1,5 @@
 [package]
-name = "angel-stage-2"
+name = "snowglobe"
 version = "0.1.0"
 authors = ["Kyle Zentner <zentner.kyle@gmail.com>"]
 build = "build.rs"
@@ -10,6 +10,7 @@ image = "0.4.*"
 capnp = "0.5.2"
 clap = "1.5.*"
 mio = "0.4.*"
+time = "0.1.*"
 
 [build-dependencies]
 capnpc = "0.5.*"

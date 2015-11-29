@@ -13,3 +13,7 @@ struct Update @0xeba1194f653a39f1 {
     entityDead @1 :UInt64;
   }
 }
+
+struct ClientMessage @0x809ef84ea48a306b {
+  updates @0 :List(Update);
+}

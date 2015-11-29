@@ -16,16 +16,14 @@ pub mod command_capnp {
 }
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::hash_map::{HashMap};
-use std::collections::binary_heap::{BinaryHeap};
+use std::collections::{HashMap};
+use std::collections::{BinaryHeap};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 use std::thread;
 
-// Setup some tokens to allow us to identify which event is
-// for which socket.
 const COMMAND: mio::Token = mio::Token(0);
 
 fn main() {
@@ -56,7 +54,6 @@ fn main() {
 
     let mut handler = start_simulation(&mut event_loop, server);
 
-    // Start handling events
     event_loop.run(&mut handler).unwrap();
 }
 
@@ -86,11 +83,17 @@ fn start_simulation(event_loop: &mut mio::EventLoop<ServerHandler>, socket: mio:
             world.entities.insert(1, Entity::new([2.0, 0.0, 0.0f32], Arc::new("simple".to_owned())));
         }
 
-        let mut t = 0;
+        let mut t = 0.0f32;
         loop {
-            sender.send(SimulationEvent::Time(t));
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            t += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            {
+                let mut world = simulation_world.lock().unwrap();
+                if let Some(e) = world.entities.get_mut(&0) {
+                    e.location[0] = f32::cos(t);
+                    e.location[1] = f32::sin(t);
+                }
+            }
+            t += 0.001f32;
         }
     });
     ServerHandler::new(socket, world)
@@ -145,8 +148,6 @@ impl Ord for ClientPriority {
 
 struct ServerHandler {
     socket: mio::udp::UdpSocket,
-    in_buffer: mio::buf::RingBuf,
-    out_buffer: mio::buf::RingBuf,
     world: Arc<Mutex<World>>,
     subscriptions: HashMap<std::net::SocketAddr, ClientState>,
     subscription_priorities: BinaryHeap<ClientPriority>
@@ -159,8 +160,6 @@ impl ServerHandler {
         ServerHandler {
             socket: socket,
             world: world,
-            in_buffer: mio::buf::RingBuf::new(BUFFER_SIZE),
-            out_buffer: mio::buf::RingBuf::new(BUFFER_SIZE),
             subscriptions: HashMap::new(),
             subscription_priorities: BinaryHeap::new()
         }
@@ -180,10 +179,11 @@ fn write_point(p: &mut common_capnp::point::Builder, point: &[f32; 3]) {
 impl ServerHandler {
     fn process_command(&mut self) -> ServerResult<()> {
         use capnp::serialize;
-        let maybe_addr : Option<std::net::SocketAddr> = try!(self.socket.recv_from(&mut self.in_buffer)
+        let mut in_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
+        let maybe_addr : Option<std::net::SocketAddr> = try!(self.socket.recv_from(&mut in_buf)
                                                              .map_err(|e| ServerError::Io("COMMAND".to_owned(), e)));
         let addr = try!(maybe_addr.ok_or(ServerError::Intermittent));
-        let reader = try!(serialize::read_message(&mut self.in_buffer,
+        let reader = try!(serialize::read_message(&mut in_buf.flip(),
                                                   ::capnp::message::ReaderOptions::new())
                           .map_err(|e| ServerError::Capnp(e)));
         let command = try!(reader.get_root::<command_capnp::command::Reader>()
@@ -220,22 +220,27 @@ impl ServerHandler {
         if let Some(mut client) = self.subscription_priorities.pop() {
             client.priority -= 1;
             let world = self.world.lock().unwrap();
-            for (id, entity) in &world.entities {
-                let mut message = capnp::message::Builder::new_default();
-                {
-                    let mut update = message.init_root::<update_capnp::update::Builder>();
+            let mut message = capnp::message::Builder::new_default();
+            {
+
+                let mut client_message = message.init_root::<update_capnp::client_message::Builder>();
+                let mut updates = client_message.init_updates(world.entities.len() as u32);
+                let mut i = 0;
+                for (id, entity) in &world.entities {
+                    let mut update = updates.borrow().get(i);
                     let mut alive = update.init_entity_alive();
                     alive.set_identity(*id);
                     alive.set_appearance(entity.appearance.as_ref());
                     write_point(&mut alive.init_location(), &entity.location);
+                    i += 1;
                 }
-                serialize::write_message(&mut self.out_buffer, &message).unwrap();
-                self.socket.send_to(&mut self.out_buffer, &client.address).unwrap();
             }
+            let mut out_buf = mio::buf::ByteBuf::mut_with_capacity(BUFFER_SIZE);
+            serialize::write_message(&mut out_buf, &message).unwrap();
+            self.socket.send_to(&mut out_buf.flip(), &client.address).unwrap();
             self.subscription_priorities.push(client);
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        std::thread::sleep(std::time::Duration::from_millis(15));
         return Ok(());
     }
 }
